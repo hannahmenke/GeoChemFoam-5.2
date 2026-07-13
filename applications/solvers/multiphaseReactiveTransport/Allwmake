@@ -5,4 +5,5 @@ set -x
 
 wmake interReactiveTransportFoam
 wmake interReactiveTransferFoam
+wmake interReactiveTransferGrotthussFoam
 # ----------------------------------------------------------------- end-of-file

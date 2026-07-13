@@ -63,6 +63,24 @@ protected:
         PtrList<dimensionedScalar> D2Y_;
         PtrList<dimensionedScalar> HY_;
         PtrList<dimensionedScalar> Mw_;
+        List<bool> grotthussActive_;
+        List<scalar> grotthussDvehicle_;
+        List<scalar> grotthussDstructural_;
+        bool grotthussSaturationSuppression_;
+        scalar grotthussSaturationExponent_;
+        scalar grotthussMinWaterSaturation_;
+        bool grotthussPHScaling_;
+        word grotthussHplusSpecies_;
+        scalar grotthussPHReference_;
+        scalar grotthussPHWidth_;
+        scalar grotthussPHMinFactor_;
+        bool grotthussIonicStrengthScaling_;
+        wordList grotthussIonicStrengthSpecies_;
+        scalarList grotthussIonicStrengthCharges_;
+        scalar grotthussIonicStrengthReference_;
+        scalar grotthussIonicStrengthExponent_;
+        scalar grotthussIonicStrengthMin_;
+        scalar grotthussIonicStrengthMinFactor_;
 
         //Total diffusion flux
         surfaceScalarField phiD_;
@@ -169,6 +187,202 @@ public:
         // calculate and return mean diffusion coefficient
         surfaceScalarField DmY(const label i) const
         {
+            if
+            (
+                grotthussActive_[i]
+             && (
+                    grotthussSaturationSuppression_
+                 || grotthussPHScaling_
+                 || grotthussIonicStrengthScaling_
+                )
+            )
+            {
+                volScalarField structuralFactor
+                (
+                    IOobject
+                    (
+                        "grotthussStructuralFactor",
+                        mesh_.time().timeName(),
+                        mesh_,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE
+                    ),
+                    mesh_,
+                    dimensionedScalar("one", dimless, 1.0)
+                );
+
+                if (grotthussSaturationSuppression_)
+                {
+                    volScalarField alphaEff
+                    (
+                        min
+                        (
+                            max
+                            (
+                                (alpha1_ - dimensionedScalar("minWaterSaturation", dimless, grotthussMinWaterSaturation_))
+                               /(dimensionedScalar("oneMinusMinWaterSaturation", dimless, 1.0 - grotthussMinWaterSaturation_)),
+                                dimensionedScalar("zero", dimless, 0.0)
+                            ),
+                            dimensionedScalar("one", dimless, 1.0)
+                        )
+                    );
+
+                    structuralFactor *= pow(alphaEff, grotthussSaturationExponent_);
+                }
+
+                if (grotthussPHScaling_)
+                {
+                    label hplusIndex(-1);
+                    forAll(species_, speciesI)
+                    {
+                        if (species_[speciesI] == grotthussHplusSpecies_)
+                        {
+                            hplusIndex = speciesI;
+                        }
+                    }
+
+                    if (hplusIndex < 0)
+                    {
+                        FatalErrorInFunction
+                            << "grotthussTransport pH scaling requested but species "
+                            << grotthussHplusSpecies_ << " was not found."
+                            << exit(FatalError);
+                    }
+
+                    volScalarField pHDistance
+                    (
+                        mag
+                        (
+                           -log10
+                            (
+                                max
+                                (
+                                    Y_[hplusIndex],
+                                    dimensionedScalar
+                                    (
+                                        "hplusFloor",
+                                        Y_[hplusIndex].dimensions(),
+                                        1e-30
+                                    )
+                                )
+                               /dimensionedScalar
+                                (
+                                    "oneMolar",
+                                    Y_[hplusIndex].dimensions(),
+                                    1.0
+                                )
+                            )
+                          - dimensionedScalar("pHReference", dimless, grotthussPHReference_)
+                        )
+                    );
+
+                    structuralFactor *=
+                        min
+                        (
+                            dimensionedScalar("one", dimless, 1.0),
+                            max
+                            (
+                                dimensionedScalar("pHMinFactor", dimless, grotthussPHMinFactor_),
+                                exp
+                                (
+                                   -pHDistance
+                                   /dimensionedScalar("pHWidth", dimless, grotthussPHWidth_)
+                                )
+                            )
+                        );
+                }
+
+                if (grotthussIonicStrengthScaling_)
+                {
+                    volScalarField ionicStrength
+                    (
+                        IOobject
+                        (
+                            "grotthussIonicStrength",
+                            mesh_.time().timeName(),
+                            mesh_,
+                            IOobject::NO_READ,
+                            IOobject::NO_WRITE
+                        ),
+                        mesh_,
+                        dimensionedScalar("zero", Y_[i].dimensions(), 0.0)
+                    );
+
+                    forAll(grotthussIonicStrengthSpecies_, ionicI)
+                    {
+                        label ionicSpeciesIndex(-1);
+                        forAll(species_, speciesI)
+                        {
+                            if (species_[speciesI] == grotthussIonicStrengthSpecies_[ionicI])
+                            {
+                                ionicSpeciesIndex = speciesI;
+                            }
+                        }
+
+                        if (ionicSpeciesIndex < 0)
+                        {
+                            FatalErrorInFunction
+                                << "grotthussTransport ionic strength species "
+                                << grotthussIonicStrengthSpecies_[ionicI]
+                                << " was not found."
+                                << exit(FatalError);
+                        }
+
+                        ionicStrength +=
+                            0.5
+                           *sqr(grotthussIonicStrengthCharges_[ionicI])
+                           *max
+                            (
+                                Y_[ionicSpeciesIndex],
+                                dimensionedScalar
+                                (
+                                    "zero",
+                                    Y_[ionicSpeciesIndex].dimensions(),
+                                    0.0
+                                )
+                            );
+                    }
+
+                    structuralFactor *=
+                        min
+                        (
+                            dimensionedScalar("one", dimless, 1.0),
+                            max
+                            (
+                                dimensionedScalar("ionicMinFactor", dimless, grotthussIonicStrengthMinFactor_),
+                                pow
+                                (
+                                    dimensionedScalar
+                                    (
+                                        "ionicReference",
+                                        ionicStrength.dimensions(),
+                                        grotthussIonicStrengthReference_
+                                    )
+                                   /max
+                                    (
+                                        ionicStrength,
+                                        dimensionedScalar
+                                        (
+                                            "ionicMin",
+                                            ionicStrength.dimensions(),
+                                            grotthussIonicStrengthMin_
+                                        )
+                                    ),
+                                    grotthussIonicStrengthExponent_
+                                )
+                            )
+                        );
+                }
+
+                volScalarField D1Eff
+                (
+                    dimensionedScalar("Dvehicle", D1Y_[i].dimensions(), grotthussDvehicle_[i])
+                  + dimensionedScalar("Dstructural", D1Y_[i].dimensions(), grotthussDstructural_[i])*structuralFactor
+                );
+
+                return fvc::interpolate(D1Eff*alpha1_+HY_[i]*D2Y_[i]*(1-alpha1_))/fvc::interpolate(alpha1_+HY_[i]*(1-alpha1_));
+            }
+
             return fvc::interpolate(D1Y_[i]*alpha1_+HY_[i]*D2Y_[i]*(1-alpha1_))/fvc::interpolate(alpha1_+HY_[i]*(1-alpha1_));
         } 
 

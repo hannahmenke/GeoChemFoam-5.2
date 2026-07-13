@@ -59,6 +59,24 @@ Foam::basicTwoPhaseMultiComponentTransportMixture::basicTwoPhaseMultiComponentTr
     D2Y_(this->subDict("solutionSpecies").toc().size()),
     HY_(this->subDict("solutionSpecies").toc().size()),
     Mw_(this->subDict("solutionSpecies").toc().size()),
+    grotthussActive_(this->subDict("solutionSpecies").toc().size(), false),
+    grotthussDvehicle_(this->subDict("solutionSpecies").toc().size(), 0.0),
+    grotthussDstructural_(this->subDict("solutionSpecies").toc().size(), 0.0),
+    grotthussSaturationSuppression_(false),
+    grotthussSaturationExponent_(1.0),
+    grotthussMinWaterSaturation_(1e-3),
+    grotthussPHScaling_(false),
+    grotthussHplusSpecies_("H+"),
+    grotthussPHReference_(7.0),
+    grotthussPHWidth_(1.0),
+    grotthussPHMinFactor_(0.0),
+    grotthussIonicStrengthScaling_(false),
+    grotthussIonicStrengthSpecies_(),
+    grotthussIonicStrengthCharges_(),
+    grotthussIonicStrengthReference_(0.01),
+    grotthussIonicStrengthExponent_(0.0),
+    grotthussIonicStrengthMin_(1e-12),
+    grotthussIonicStrengthMinFactor_(0.0),
     phiD_
 	(
 		IOobject
@@ -134,6 +152,191 @@ Foam::basicTwoPhaseMultiComponentTransportMixture::basicTwoPhaseMultiComponentTr
 			new dimensionedScalar("Mw",subdict)
 		);
 	}
+
+    if (this->found("grotthussTransport"))
+    {
+        const dictionary& grotthussDict = this->subDict("grotthussTransport");
+        const Switch enabled(grotthussDict.lookupOrDefault<Switch>("enabled", false));
+
+        if (enabled)
+        {
+            const scalar accelerationFactor =
+                grotthussDict.lookupOrDefault<scalar>("accelerationFactor", 1.0);
+            grotthussSaturationSuppression_ =
+                grotthussDict.lookupOrDefault<Switch>("useWaterSaturationSuppression", false);
+            grotthussSaturationExponent_ =
+                grotthussDict.lookupOrDefault<scalar>("saturationExponent", 1.0);
+            grotthussMinWaterSaturation_ =
+                grotthussDict.lookupOrDefault<scalar>("minWaterSaturation", 1e-3);
+            grotthussPHScaling_ =
+                grotthussDict.lookupOrDefault<Switch>("usePHScaling", false);
+            grotthussHplusSpecies_ =
+                grotthussDict.lookupOrDefault<word>("hplusSpecies", "H+");
+            grotthussPHReference_ =
+                grotthussDict.lookupOrDefault<scalar>("pHReference", 7.0);
+            grotthussPHWidth_ =
+                grotthussDict.lookupOrDefault<scalar>("pHWidth", 1.0);
+            grotthussPHMinFactor_ =
+                grotthussDict.lookupOrDefault<scalar>("pHMinFactor", 0.0);
+            grotthussIonicStrengthScaling_ =
+                grotthussDict.lookupOrDefault<Switch>("useIonicStrengthScaling", false);
+            grotthussIonicStrengthReference_ =
+                grotthussDict.lookupOrDefault<scalar>("ionicStrengthReference", 0.01);
+            grotthussIonicStrengthExponent_ =
+                grotthussDict.lookupOrDefault<scalar>("ionicStrengthExponent", 0.0);
+            grotthussIonicStrengthMin_ =
+                grotthussDict.lookupOrDefault<scalar>("ionicStrengthMin", 1e-12);
+            grotthussIonicStrengthMinFactor_ =
+                grotthussDict.lookupOrDefault<scalar>("ionicStrengthMinFactor", 0.0);
+
+            if (grotthussDict.found("ionicStrengthSpecies"))
+            {
+                grotthussDict.lookup("ionicStrengthSpecies") >> grotthussIonicStrengthSpecies_;
+            }
+            if (grotthussDict.found("ionicStrengthCharges"))
+            {
+                grotthussDict.lookup("ionicStrengthCharges") >> grotthussIonicStrengthCharges_;
+            }
+
+            if (grotthussMinWaterSaturation_ < 0.0 || grotthussMinWaterSaturation_ >= 1.0)
+            {
+                FatalErrorInFunction
+                    << "grotthussTransport minWaterSaturation must be in [0, 1), got "
+                    << grotthussMinWaterSaturation_ << exit(FatalError);
+            }
+
+            if (grotthussSaturationExponent_ <= 0.0)
+            {
+                FatalErrorInFunction
+                    << "grotthussTransport saturationExponent must be positive, got "
+                    << grotthussSaturationExponent_ << exit(FatalError);
+            }
+
+            if (grotthussPHScaling_ && grotthussPHWidth_ <= 0.0)
+            {
+                FatalErrorInFunction
+                    << "grotthussTransport pHWidth must be positive, got "
+                    << grotthussPHWidth_ << exit(FatalError);
+            }
+
+            if (grotthussPHMinFactor_ < 0.0 || grotthussPHMinFactor_ > 1.0)
+            {
+                FatalErrorInFunction
+                    << "grotthussTransport pHMinFactor must be in [0, 1], got "
+                    << grotthussPHMinFactor_ << exit(FatalError);
+            }
+
+            if (grotthussIonicStrengthScaling_)
+            {
+                if
+                (
+                    grotthussIonicStrengthSpecies_.size()
+                 != grotthussIonicStrengthCharges_.size()
+                 || grotthussIonicStrengthSpecies_.empty()
+                )
+                {
+                    FatalErrorInFunction
+                        << "grotthussTransport ionic strength scaling requires "
+                        << "nonempty ionicStrengthSpecies and ionicStrengthCharges "
+                        << "lists of the same length." << exit(FatalError);
+                }
+
+                if (grotthussIonicStrengthReference_ <= 0.0)
+                {
+                    FatalErrorInFunction
+                        << "grotthussTransport ionicStrengthReference must be positive, got "
+                        << grotthussIonicStrengthReference_ << exit(FatalError);
+                }
+
+                if (grotthussIonicStrengthMin_ <= 0.0)
+                {
+                    FatalErrorInFunction
+                        << "grotthussTransport ionicStrengthMin must be positive, got "
+                        << grotthussIonicStrengthMin_ << exit(FatalError);
+                }
+
+                if
+                (
+                    grotthussIonicStrengthMinFactor_ < 0.0
+                 || grotthussIonicStrengthMinFactor_ > 1.0
+                )
+                {
+                    FatalErrorInFunction
+                        << "grotthussTransport ionicStrengthMinFactor must be in [0, 1], got "
+                        << grotthussIonicStrengthMinFactor_ << exit(FatalError);
+                }
+            }
+
+            wordList grotthussKeys(grotthussDict.toc());
+
+            forAll(species_, i)
+            {
+                forAll(grotthussKeys, keyi)
+                {
+                    if (!grotthussDict.isDict(grotthussKeys[keyi]))
+                    {
+                        continue;
+                    }
+
+                    const dictionary& speciesDict =
+                        grotthussDict.subDict(grotthussKeys[keyi]);
+
+                    const word transportName =
+                        speciesDict.lookupOrDefault<word>("name", grotthussKeys[keyi]);
+
+                    if (transportName != species_[i])
+                    {
+                        continue;
+                    }
+
+                    dimensionedScalar Dvehicle("Dvehicle", speciesDict);
+                    dimensionedScalar Dstructural("Dstructural", speciesDict);
+                    const scalar DvehicleValue = accelerationFactor*Dvehicle.value();
+                    const scalar DstructuralValue = accelerationFactor*Dstructural.value();
+
+                    D1Y_.set
+                    (
+                        i,
+                        new dimensionedScalar
+                        (
+                            "D1",
+                            Dvehicle.dimensions(),
+                            DvehicleValue + DstructuralValue
+                        )
+                    );
+                    grotthussActive_[i] = true;
+                    grotthussDvehicle_[i] = DvehicleValue;
+                    grotthussDstructural_[i] = DstructuralValue;
+
+                    Info<< "Grotthuss effective D1 for " << species_[i]
+                        << " = " << D1Y_[i].value() << " m2/s" << nl;
+                    if (grotthussSaturationSuppression_)
+                    {
+                        Info<< "Grotthuss structural diffusion for " << species_[i]
+                            << " is scaled by water saturation with exponent "
+                            << grotthussSaturationExponent_ << " and minimum saturation "
+                            << grotthussMinWaterSaturation_ << nl;
+                    }
+                    if (grotthussPHScaling_)
+                    {
+                        Info<< "Grotthuss structural diffusion for " << species_[i]
+                            << " is scaled by pH distance from "
+                            << grotthussPHReference_ << " with pHWidth "
+                            << grotthussPHWidth_ << " and pHMinFactor "
+                            << grotthussPHMinFactor_ << nl;
+                    }
+                    if (grotthussIonicStrengthScaling_)
+                    {
+                        Info<< "Grotthuss structural diffusion for " << species_[i]
+                            << " is scaled by ionic strength using species "
+                            << grotthussIonicStrengthSpecies_
+                            << " and reference "
+                            << grotthussIonicStrengthReference_ << nl;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // * * * * * * * * * * * * * * * * Destructor  * * * * * * * * * * * * * * * //

@@ -1,0 +1,3 @@
+interReactiveTransferGrotthussFoam.C
+
+EXE = $(GCFOAM_APPBIN)/interReactiveTransferGrotthussFoam

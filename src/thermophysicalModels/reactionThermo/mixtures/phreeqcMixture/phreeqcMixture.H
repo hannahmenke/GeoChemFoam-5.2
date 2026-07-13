@@ -47,6 +47,9 @@ class phreeqcMixture
 	//initialise phreeqc module 
 	void initialise();
 
+    //update selected-output diagnostics
+    void updateSelectedOutput();
+
 	//OpenFOAM mesh
 	const fvMesh& mesh_;
 
@@ -55,6 +58,9 @@ class phreeqcMixture
 
     //ionic strength
     volScalarField I_;
+
+    //activity-based pH from PHREEQC selected output
+    volScalarField pHActivity_;
 
     //surface potential
     volScalarField psi_;

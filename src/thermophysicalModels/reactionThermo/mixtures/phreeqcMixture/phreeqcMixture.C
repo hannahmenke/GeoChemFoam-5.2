@@ -48,6 +48,15 @@ void Foam::phreeqcMixture::initialise()
 	//load reaction
 	RM_RunFile(id_, 1, 1, 0, "constant/phreeqcReactions");
 
+    // Request activity-based pH as selected output user number 5.
+    std::string selectedOutputInput =
+        "SELECTED_OUTPUT 5\n"
+        "    -reset false\n"
+        "    -pH true\n"
+        "END\n";
+    RM_RunString(id_, 1, 1, 0, selectedOutputInput.c_str());
+    RM_SetSelectedOutputOn(id_, 1);
+
 	//solution component list
 	std::ostringstream oss;
 
@@ -138,6 +147,7 @@ void Foam::phreeqcMixture::initialise()
 	{
 		components[i] = (char *)malloc((size_t)(20 * sizeof(char *)));
 		RM_GetSpeciesName(id_, i, components[i], 20);
+        Info << "PHREEQC solution species[" << i << "]: " << components[i] << "\n";
 	}
 
 	//get number of surface species
@@ -161,6 +171,7 @@ void Foam::phreeqcMixture::initialise()
 	componentSurfaceIndex_  = (int*)malloc((size_t)(surfaceSpecies_.size() * sizeof(int)));
 	forAll(species_, i)
 	{
+		componentSolutionIndex_[i] = -1;
 		for (int j = 0; j < nsol; j++)
 		{
 			std::string component = components[j];
@@ -169,10 +180,19 @@ void Foam::phreeqcMixture::initialise()
 				componentSolutionIndex_[i] = j;
 			}
 		}
+		if (componentSolutionIndex_[i] < 0)
+		{
+			FatalErrorInFunction
+				<< "Transported solution species " << species_[i]
+				<< " was not found in PHREEQC saved species. "
+				<< "Use a PHREEQC species name in solutionSpecies."
+				<< abort(FatalError);
+		}
 	}
 
 	forAll(surfaceSpecies_, i)
 	{
+		componentSurfaceIndex_[i] = -1;
 		for (int j = 0; j < nsurf; j++)
 		{
 			std::string component = surfComponents[j];
@@ -180,6 +200,13 @@ void Foam::phreeqcMixture::initialise()
 			{
 				componentSurfaceIndex_[i] = j;
 			}
+		}
+		if (componentSurfaceIndex_[i] < 0)
+		{
+			FatalErrorInFunction
+				<< "Transported surface species " << surfaceSpecies_[i]
+				<< " was not found in PHREEQC saved surface species."
+				<< abort(FatalError);
 		}
 	}
 
@@ -197,6 +224,7 @@ void Foam::phreeqcMixture::initialise()
 	RM_GetSurfaceSpeciesConcentrations(id_, surfConcentration_);
 	RM_GetSurfaceArea(id_,"Surf",surfArea_);
 	RM_GetSurfacePotential(id_,"Surf",surfPotential_);
+    updateSelectedOutput();
 
 	//set water saturation for Phreeqc module
 	saturation_ = (double *)malloc((size_t)(ncells * sizeof(double)));
@@ -278,6 +306,19 @@ Foam::phreeqcMixture::phreeqcMixture
         mesh,
 	    dimensionedScalar("I", dimMoles/dimVolume, 0.0)
     ),
+    pHActivity_
+    (
+        IOobject
+        (
+            "pHActivity",
+            mesh.time().timeName(),
+            mesh,
+            IOobject::READ_IF_PRESENT,
+            IOobject::AUTO_WRITE
+        ),
+        mesh,
+	    dimensionedScalar("pHActivity", dimless, 7.0)
+    ),
     psi_
     (
         IOobject
@@ -297,7 +338,8 @@ Foam::phreeqcMixture::phreeqcMixture
     concentration_(NULL),
     surfConcentration_(NULL),
     surfArea_(NULL),
-    surfPotential_(NULL)
+    surfPotential_(NULL),
+    selectedOutput_(NULL)
 {
     initialise();
 }
@@ -338,6 +380,19 @@ Foam::phreeqcMixture::phreeqcMixture
         mesh,
 	    dimensionedScalar("I", dimMoles/dimVolume, 0.0)
     ),
+    pHActivity_
+    (
+        IOobject
+        (
+            "pHActivity",
+            mesh.time().timeName(),
+            mesh,
+            IOobject::READ_IF_PRESENT,
+            IOobject::AUTO_WRITE
+        ),
+        mesh,
+	    dimensionedScalar("pHActivity", dimless, 7.0)
+    ),
     psi_
     (
         IOobject
@@ -357,7 +412,8 @@ Foam::phreeqcMixture::phreeqcMixture
     concentration_(NULL),
     surfConcentration_(NULL),
     surfArea_(NULL),
-    surfPotential_(NULL)
+    surfPotential_(NULL),
+    selectedOutput_(NULL)
 {
     initialise();
 }
@@ -374,9 +430,97 @@ Foam::phreeqcMixture::~phreeqcMixture
 	free(surfConcentration_);
 	free(surfArea_);
 	free(surfPotential_);
+	free(selectedOutput_);
 }
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
+void Foam::phreeqcMixture::updateSelectedOutput()
+{
+    int ncells = mesh_.cells().size();
+    static bool selectedOutputWarningIssued(false);
+
+    if (RM_SetCurrentSelectedOutputUserNumber(id_, 5) < 0)
+    {
+        if (!selectedOutputWarningIssued)
+        {
+            WarningInFunction
+                << "PHREEQC selected output user number 5 is not available. "
+                << "Setting pHActivity to sentinel value 30."
+                << endl;
+            selectedOutputWarningIssued = true;
+        }
+        pHActivity_ = dimensionedScalar("pHActivityMissing", dimless, 30.0);
+        return;
+    }
+
+    int ncol = RM_GetSelectedOutputColumnCount(id_);
+    int nrow = RM_GetSelectedOutputRowCount(id_);
+
+    if (ncol < 1 || nrow < ncells)
+    {
+        if (!selectedOutputWarningIssued)
+        {
+            WarningInFunction
+                << "PHREEQC selected output has " << nrow
+                << " rows and " << ncol << " columns for " << ncells
+                << " cells. Setting pHActivity to sentinel value 30."
+                << endl;
+            selectedOutputWarningIssued = true;
+        }
+        pHActivity_ = dimensionedScalar("pHActivityMissing", dimless, 30.0);
+        return;
+    }
+
+    if (nrow != ncells && !selectedOutputWarningIssued)
+    {
+        WarningInFunction
+            << "PHREEQC selected output row count " << nrow
+            << " differs from mesh cell count " << ncells
+            << ". Using trailing rows for pHActivity mapping."
+            << endl;
+        selectedOutputWarningIssued = true;
+    }
+
+    selectedOutput_ =
+        (double*)realloc(selectedOutput_, (size_t)(ncol * nrow * sizeof(double)));
+
+    if (selectedOutput_ == NULL)
+    {
+        FatalErrorInFunction
+            << "Could not allocate PHREEQC selected output buffer"
+            << abort(FatalError);
+    }
+
+    if (RM_GetSelectedOutput(id_, selectedOutput_) < 0)
+    {
+        if (!selectedOutputWarningIssued)
+        {
+            WarningInFunction
+                << "Could not read PHREEQC selected output. "
+                << "Setting pHActivity to sentinel value 30."
+                << endl;
+            selectedOutputWarningIssued = true;
+        }
+        pHActivity_ = dimensionedScalar("pHActivityMissing", dimless, 30.0);
+        return;
+    }
+
+    int rowOffset = nrow - ncells;
+    forAll(mesh_.cells(), celli)
+    {
+        scalar selectedPH = selectedOutput_[(rowOffset + celli) * ncol];
+        bool aqueousCell = (saturation_ == NULL) || saturation_[celli] > 1e-3;
+        if (aqueousCell && selectedPH > -100 && selectedPH < 100)
+        {
+            pHActivity_[celli] = selectedPH;
+        }
+        else
+        {
+            pHActivity_[celli] = 30.0;
+        }
+    }
+}
+
 void Foam::phreeqcMixture::correct()
 {
 	//get number of cells
@@ -435,6 +579,9 @@ void Foam::phreeqcMixture::correct()
 
 	//get ionic strength
 	RM_GetSolutionIonicStrength(id_, &I_[0]);
+
+    //get activity-based pH from PHREEQC selected output
+    updateSelectedOutput();
 
 	//get reaction rate and new vector composition
 	forAll(species_, i)
